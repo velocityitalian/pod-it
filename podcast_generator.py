@@ -395,7 +395,7 @@ Write the NEXT {batch_size} turns. Speakers STRICTLY alternate starting with {cu
 
 {intro_instruction}Each turn: 3-4 SHORT sentences (6-10 words each) with PERIODS for natural TTS pauses. 20-30 seconds spoken.
 Simple present tense. A2 vocabulary. Natural Italian. NO filler sounds.
-IMPORTANT: Highlight exactly 1 key A2 target vocabulary word in each turn's Italian text using double asterisks, for example: "Wir schauen in die **Zukunft**."
+IMPORTANT: Highlight exactly 1 key A2 target vocabulary word in each turn's Italian text using double asterisks, for example: "Guardiamo al **futuro**."
 
 Return EXACTLY {batch_size} turns as a JSON array (no markdown):
 [{{"speaker": "{current_host}", "italian": "...", "english": "..."}},
@@ -406,7 +406,7 @@ Return EXACTLY {batch_size} turns as a JSON array (no markdown):
             resp = requests.post("https://gen.pollinations.ai/v1/chat/completions", json={
                 "model": AI_MODEL,
                 "messages": [
-                    {"role": "system", "content": "You write natural A2-level Italian podcast scripts with VERY clear punctuation. Every sentence must have at least 2 commas for natural TTS pauses. Giulia and Matteo strictly alternate. Highlight 1 key target word per turn in double asterisks like **Wort**. No filler sounds."},
+                    {"role": "system", "content": "You write natural A2-level Italian podcast scripts with VERY clear punctuation. Every sentence must have at least 2 commas for natural TTS pauses. Giulia and Matteo strictly alternate. Highlight 1 key target word per turn in double asterisks like **parola**. No filler sounds."},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.9
@@ -499,11 +499,11 @@ def generate_script():
 
     # Short 2-line intro: Matteo (Host2) first, then Giulia (Host1), then topic
     all_turns[0]["speaker"] = "Host2"
-    all_turns[0]["italian"] = f"Hallo, ich bin Matteo. Willkommen bei Velocity Italian. Heute sprechen wir über {topic_es}."
+    all_turns[0]["italian"] = f"Ciao, sono Matteo. Benvenuti a Velocity Italian. Oggi parliamo di. Willkommen bei Velocity Italian. Heute sprechen wir über {topic_es}."
     all_turns[0]["english"] = f"Hi, I'm Matteo. Welcome to Velocity Italian Podcast. Today we talk about {topic_en}."
     if len(all_turns) > 1:
         all_turns[1]["speaker"] = "Host1"
-        all_turns[1]["italian"] = f"Danke, Matteo. Das heutige Thema ist sehr **interessant**. Los geht's."
+        all_turns[1]["italian"] = f"Danke, Matteo. Das heutige Thema è molto **interessante**. Los geht's."
         all_turns[1]["english"] = f"Thanks, Matteo. Today's topic is very interesting. Let's start."
 
     print(f"  Script: {len(all_turns)} turns, topic: {topic_es}")
@@ -515,9 +515,9 @@ def _fallback_script(topic_es, topic_en):
     for i in range(150):
         s = "Host2" if i % 2 == 0 else "Host1"
         if s == "Host2":
-            turns.append({"speaker": s, "italian": f"Hallo, ich bin Matteo. Sprechen wir über die **Zukunft** und über {topic_es}.", "english": f"Hi, I'm Matteo. Let's talk about the future and {topic_en}."})
+            turns.append({"speaker": s, "italian": f"Ciao, sono Matteo. Benvenuti a Velocity Italian. Oggi parliamo di. Benvenuti a Velocity Italian. Oggi parliamo di {topic_es}.", "english": f"Hi, I'm Matteo. Let's talk about the future and {topic_en}."})
         else:
-            turns.append({"speaker": s, "italian": f"Gute Idee Matteo. {topic_es} ist sehr **interessant**.", "english": f"Good idea Matteo. {topic_en} is very interesting."})
+            turns.append({"speaker": s, "italian": f"Buona idea, Matteo. {topic_es} è molto **interessante**.", "english": f"Good idea Matteo. {topic_en} is very interesting."})
     return turns
 
 
