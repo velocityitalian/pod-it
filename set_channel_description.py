@@ -11,7 +11,7 @@ from googleapiclient.discovery import build
 
 load_dotenv()
 
-CHANNEL_DESCRIPTION = "🎙️ Velocity Italian Podcast - Impara l'italiano in modo naturale - con il nostro podcast bilingue.\n\nLearn Italian naturally - with our bilingual podcast.\n\nBienvenidos al podcast bilingüe. Cada episodio es una conversación sencilla entre Giulia e Matteo, a nivel A2.\n\n📚 WHAT YOU'LL GET:\n• Daily bilingual conversations\n• Natural pronunciation from native speakers\n• Practical vocabulary for everyday life\n• Short, easy-to-follow episodes\n\n🇪🇸 How to use this podcast:\n1. Ascolta in italiano e prova a capire\n2. Controlla la traduzione in inglese\n3. Ripeti le frasi ad alta voce\n4. Riascolta domani - ogni giorno diventa più facile!\n\n🔔 Subscribe and turn on notifications so you never miss a lesson.\n\n📅 New episodes every day!\n\n#LearnItalian #Podcast #Bilingual #LanguageLearning"
+CHANNEL_DESCRIPTION = "🎙️ Velocity Italian Podcast - Impara l'italiano in modo naturale - con il nostro podcast bilingue.\n\nLearn Italian naturally - with our bilingual podcast.\n\nBenvenuti al podcast bilingue. Ogni episodio è una conversazione semplice tra Giulia e Matteo, a livello A2.\n\n📚 WHAT YOU'LL GET:\n• Daily bilingual conversations\n• Natural pronunciation from native speakers\n• Practical vocabulary for everyday life\n• Short, easy-to-follow episodes\n\n🇮🇹 How to use this podcast:\n1. Ascolta in italiano e prova a capire\n2. Controlla la traduzione in inglese\n3. Ripeti le frasi ad alta voce\n4. Riascolta domani - ogni giorno diventa più facile!\n\n🔔 Subscribe and turn on notifications so you never miss a lesson.\n\n📅 New episodes every day!\n\n#LearnItalian #Podcast #Bilingual #LanguageLearning"
 
 
 def _get_creds():
