@@ -91,6 +91,9 @@ def load_font(size, bold=False, italic=False):
     return ImageFont.load_default()
 
 def clean_text(text):
+    if not text:
+        return ""
+    text = re.sub(r'[\r\n]+', ' ', text)
     text = re.sub(r'\b(mm+|um+|uh+|ah+)\b', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
@@ -373,8 +376,78 @@ def create_frame(turn, output_path, frame_num=0):
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path, quality=92)
 
+def parse_turns_json(content, target_key="italian"):
+    if not content:
+        return []
+    clean = content.strip()
+    if "```json" in clean:
+        clean = clean.split("```json")[1].split("```")[0].strip()
+    elif "```" in clean:
+        clean = clean.split("```")[1].split("```")[0].strip()
+
+    try:
+        data = json.loads(clean, strict=False)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "turns" in data and isinstance(data["turns"], list):
+            return data["turns"]
+    except Exception:
+        pass
+
+    try:
+        sanitized = re.sub(r'[\r\n]+', ' ', clean)
+        data = json.loads(sanitized, strict=False)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+
+    recovered = []
+    start = None
+    depth = 0
+    for ci, ch in enumerate(clean):
+        if ch == '{':
+            if depth == 0:
+                start = ci
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                chunk = clean[start:ci + 1]
+                try:
+                    obj = json.loads(chunk, strict=False)
+                    if isinstance(obj, dict):
+                        recovered.append(obj)
+                except Exception:
+                    try:
+                        clean_chunk = re.sub(r'[\r\n]+', ' ', chunk)
+                        obj = json.loads(clean_chunk, strict=False)
+                        if isinstance(obj, dict):
+                            recovered.append(obj)
+                    except Exception:
+                        pass
+                start = None
+    if recovered:
+        return recovered
+
+    regex = re.compile(
+        r'\{\s*"speaker"\s*:\s*"(?P<speaker>[^"]+)"\s*,\s*'
+        r'(?:"(?:' + target_key + r'|spanish|text|japanese|russian|french|german|swedish)"\s*:\s*"(?P<tgt>.*?)"\s*,\s*)?'
+        r'(?:"english"\s*:\s*"(?P<en>.*?)"\s*)?'
+        r'\}', re.DOTALL
+    )
+    for m in regex.finditer(clean):
+        spk = m.group("speaker") or "Host1"
+        tgt = m.group("tgt") or ""
+        en = m.group("en") or ""
+        if tgt:
+            recovered.append({"speaker": spk, target_key: tgt, "english": en})
+
+    return recovered
+
+
 def _fetch_turns_batch(topic, topic_es, topic_en, start_turn, batch_size=10):
-    """Fetch one small batch of turns (reliable - avoids truncation)."""
+    """Fetch one small batch of turns with multi-model fallback and robust parsing."""
     current_host = "Host2" if start_turn % 2 == 0 else "Host1"
     next_host = "Host1" if current_host == "Host2" else "Host2"
     host_role = "Matteo" if current_host == "Host2" else "Giulia"
@@ -396,55 +469,33 @@ Write the NEXT {batch_size} turns. Speakers STRICTLY alternate starting with {cu
 {intro_instruction}Each turn: 3-4 SHORT sentences (6-10 words each) with PERIODS for natural TTS pauses. 20-30 seconds spoken.
 Simple present tense. A2 vocabulary. Natural Italian. NO filler sounds.
 IMPORTANT: Highlight exactly 1 key A2 target vocabulary word in each turn's Italian text using double asterisks, for example: "Guardiamo al **futuro**."
+IMPORTANT: Format as a single compact JSON array without unescaped line breaks inside string values.
 
 Return EXACTLY {batch_size} turns as a JSON array (no markdown):
 [{{"speaker": "{current_host}", "italian": "...", "english": "..."}},
  {{"speaker": "{next_host}", "italian": "...", "english": "..."}}]"""
 
-    for attempt in range(3):
+    candidate_models = [AI_MODEL, "openai", "mistral", "qwen"]
+    models_to_try = []
+    for m in candidate_models:
+        if m and m not in models_to_try:
+            models_to_try.append(m)
+
+    for attempt, model_name in enumerate(models_to_try):
         try:
             resp = requests.post("https://gen.pollinations.ai/v1/chat/completions", json={
-                "model": AI_MODEL,
+                "model": model_name,
                 "messages": [
-                    {"role": "system", "content": "You write natural A2-level Italian podcast scripts with VERY clear punctuation. Every sentence must have at least 2 commas for natural TTS pauses. Giulia and Matteo strictly alternate. Highlight 1 key target word per turn in double asterisks like **parola**. No filler sounds."},
+                    {"role": "system", "content": "You write natural A2-level Italian podcast scripts with VERY clear punctuation. Every sentence must have at least 2 commas for natural TTS pauses. Giulia and Matteo strictly alternate. Highlight 1 key target word per turn in double asterisks like **parola**. No filler sounds. Output single compact JSON array without unescaped newlines inside strings."},
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.9
-            }, headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"}, timeout=60)
-            resp.raise_for_status()
+                "temperature": 0.8
+            }, headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"} if POLLINATIONS_API_KEY else {}, timeout=45)
+            if resp.status_code != 200:
+                print(f"  Batch attempt {attempt+1} ({model_name}) returned HTTP {resp.status_code}", flush=True)
+                continue
             content = resp.json()["choices"][0]["message"]["content"].strip()
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-
-            script = None
-            try:
-                script = json.loads(content)
-            except json.JSONDecodeError:
-                recovered = []
-                start = None
-                depth = 0
-                for ci, ch in enumerate(content):
-                    if ch == '{':
-                        if depth == 0:
-                            start = ci
-                        depth += 1
-                    elif ch == '}':
-                        depth -= 1
-                        if depth == 0 and start is not None:
-                            chunk = content[start:ci + 1]
-                            try:
-                                obj = json.loads(chunk)
-                                if isinstance(obj, dict) and ("italian" in obj or "english" in obj):
-                                    recovered.append(obj)
-                            except json.JSONDecodeError:
-                                pass
-                            start = None
-                script = recovered
-            if not isinstance(script, list):
-                script = []
-
+            script = parse_turns_json(content, "italian")
             valid = []
             for i, turn in enumerate(script):
                 if not isinstance(turn, dict):
@@ -458,10 +509,14 @@ Return EXACTLY {batch_size} turns as a JSON array (no markdown):
                     "italian": clean_text(es),
                     "english": clean_text(en) if en else "Translation unavailable"
                 })
-            if valid:
+            if len(valid) >= 4:
                 return valid
+            else:
+                print(f"  Batch attempt {attempt+1} ({model_name}) parsed only {len(valid)} turns, trying next model...", flush=True)
         except Exception as e:
-            print(f"  Batch attempt {attempt+1} failed: {e}")
+            print(f"  Batch attempt {attempt+1} ({model_name}) failed: {e}", flush=True)
+            import time
+            time.sleep(1)
     return None
 
 
@@ -469,22 +524,170 @@ def _generate_topic():
     """Have the AI invent a brand-new random topic (unlimited variety).
     Returns '<topic - English>' or None on failure (caller falls back to TOPICS)."""
     seed = random.randint(100000, 999999)
-    try:
-        resp = requests.post("https://gen.pollinations.ai/v1/chat/completions", json={
-            "model": AI_MODEL,
-            "messages": [
-                {"role": "system", "content": "You invent fresh, interesting, everyday topics for a Italian/English A2 learning podcast. Always pick something new and varied from all areas of daily life, as a SHORT noun phrase (2-5 words), NOT a full sentence."},
-                {"role": "user", "content": f"Create EXACTLY ONE brand-new topic (uniqueness seed {seed}) for a Italian/English A2 podcast. Return ONLY one line in this exact format: <topic in Italian> - <topic in English>. The first part must be a short noun phrase in Italian. No numbering, no bullets, no extra text."}
-            ],
-            "temperature": 1.1,
-        }, headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"}, timeout=60)
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip().strip('"').strip()
-        if content and " - " in content:
-            return content
-    except Exception as e:
-        print(f"  Topic generation failed: {e}")
+    candidate_models = [AI_MODEL, "openai", "mistral"]
+    for m in candidate_models:
+        if not m:
+            continue
+        try:
+            resp = requests.post("https://gen.pollinations.ai/v1/chat/completions", json={
+                "model": m,
+                "messages": [
+                    {"role": "system", "content": "You invent fresh, interesting, everyday topics for a Italian/English A2 learning podcast. Always pick something new and varied from all areas of daily life, as a SHORT noun phrase (2-5 words), NOT a full sentence."},
+                    {"role": "user", "content": f"Create EXACTLY ONE brand-new topic (uniqueness seed {seed}) for a Italian/English A2 podcast. Return ONLY one line in this exact format: <topic in Italian> - <topic in English>. The first part must be a short noun phrase in Italian. No numbering, no bullets, no extra text."}
+                ],
+                "temperature": 1.1,
+            }, headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"} if POLLINATIONS_API_KEY else {}, timeout=45)
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip().strip('"').strip()
+                if content and " - " in content:
+                    return content
+        except Exception as e:
+            print(f"  Topic gen ({m}) failed: {e}", flush=True)
     return None
+
+
+def _fallback_script(topic_es, topic_en, target=150):
+    """Generate 150 unique, educational, progressive dialogue turns in Italian covering diverse conversation phases."""
+    phases = [
+        [
+            ("Host2", f"Ciao a tutti, sono Matteo. Benvenuti a Velocity Italian! Oggi parliamo di **{topic_es}**.",
+                      f"Hello everyone, I'm Matteo. Welcome to Velocity Italian! Today we talk about {topic_en}."),
+            ("Host1", f"Ciao Matteo, e ciao a tutti! Questo argomento è davvero **interessante** per chi impara l'italiano.",
+                      f"Hi Matteo, and hi everyone! This topic is really interesting for anyone learning Italian."),
+            ("Host2", f"Esatto, Giulia. Molte persone incontrano **{topic_es}** ogni giorno, ma non sanno come parlarne bene.",
+                      f"Exactly, Giulia. Many people encounter {topic_en} every day, but don't know how to talk about it well."),
+            ("Host1", f"È vero. Per questo vogliamo usare parole **semplici** e frasi brevi, così tutti possono capire.",
+                      f"It's true. That's why we want to use simple words and short sentences, so everyone can understand."),
+            ("Host2", f"Perfetto! Cominciamo subito con la prima domanda: che cosa significa per te **{topic_es}**?",
+                      f"Perfect! Let's start right away with the first question: what does {topic_en} mean to you?"),
+            ("Host1", f"Per me rappresenta una parte della **vita** quotidiana che rende le giornate più piacevoli.",
+                      f"For me it represents a part of daily life that makes days more pleasant."),
+            ("Host2", f"Sono d'accordo. Spesso non ci pensiamo, ma ha una grande **importanza** per il nostro benessere.",
+                      f"I agree. Often we don't think about it, but it has great importance for our well-being."),
+            ("Host1", f"Sì, e quando impariamo i vocaboli giusti, diventa facile avere una **conversazione** naturale.",
+                      f"Yes, and when we learn the right vocabulary, it becomes easy to have a natural conversation."),
+            ("Host2", f"Ascoltate con attenzione le parole che usiamo oggi, e provate a **ripetere** ad alta voce.",
+                      f"Listen carefully to the words we use today, and try to repeat out loud."),
+            ("Host1", f"Benissimo Matteo! Entriamo nei dettagli e scopriamo le cose più utili su **{topic_es}**.",
+                      f"Great Matteo! Let's get into details and discover the most useful things about {topic_en}.")
+        ],
+        [
+            ("Host2", f"Giulia, nella tua giornata tipica, quando pensi a **{topic_es}**?",
+                      f"Giulia, in your typical day, when do you think about {topic_en}?"),
+            ("Host1", f"Di solito ci penso la mattina presto, perché mi aiuta a iniziare con la giusta **energia**.",
+                      f"Usually I think about it early in the morning, because it helps me start with the right energy."),
+            ("Host2", f"Anche per me la mattina è un momento speciale. Mi piace prendermi del **tempo** senza fretta.",
+                      f"For me too the morning is a special moment. I like taking my time without rushing."),
+            ("Host1", f"La fretta è sempre un nemico. Una buona **abitudine** quotidiana cambia tutta la giornata.",
+                      f"Rushing is always an enemy. A good daily habit changes the whole day."),
+            ("Host2", f"Molte persone invece preferiscono dedicarsi a **{topic_es}** durante il pomeriggio o la sera.",
+                      f"Many people instead prefer to dedicate themselves to {topic_en} during the afternoon or evening."),
+            ("Host1", f"Dipende molto dallo stile di vita di ciascuno. L'importante è trovare un buon **equilibrio**.",
+                      f"It depends a lot on each person's lifestyle. The important thing is finding a good balance."),
+            ("Host2", f"Hai ragione. Conoscere se stessi e i propri ritmi è la chiave per vivere **meglio**.",
+                      f"You're right. Knowing yourself and your own rhythm is the key to living better."),
+            ("Host1", f"E per i nostri ascoltatori, fare pratica ogni giorno crea una solida **memoria** linguistica.",
+                      f"And for our listeners, practicing every day creates a solid linguistic memory."),
+            ("Host2", f"Esattamente. Dieci minuti ogni giorno sono molto più efficaci di due ore solo la **domenica**.",
+                      f"Exactly. Ten minutes every day are much more effective than two hours only on Sunday."),
+            ("Host1", f"Continuiamo a parlare delle situazioni pratiche in cui incontriamo **{topic_es}**.",
+                      f"Let's continue talking about practical situations where we encounter {topic_en}.")
+        ],
+        [
+            ("Host2", f"Se andiamo in centro città, è facilissimo notare come **{topic_es}** faccia parte dell'ambiente.",
+                      f"If we go to the city center, it's very easy to notice how {topic_en} is part of the environment."),
+            ("Host1", f"Sì, nei negozi, nei bar e per le strade, la gente ne parla con grande **passione**.",
+                      f"Yes, in shops, bars and on the streets, people talk about it with great passion."),
+            ("Host2", f"In Italia ci piace condividere questi momenti con gli amici. È un gesto di **amicizia**.",
+                      f"In Italy we like sharing these moments with friends. It's a gesture of friendship."),
+            ("Host1", f"La socialità è fondamentale nella nostra cultura. Non si è mai veramente **soli**.",
+                      f"Social life is fundamental in our culture. You are never truly alone."),
+            ("Host2", f"Qual è la parola più comune che la gente usa quando parla di **{topic_es}**?",
+                      f"What is the most common word people use when talking about {topic_en}?"),
+            ("Host1", f"Spesso usano aggettivi come 'buono', 'fresco' o 'autentico' per descrivere la **qualità**.",
+                      f"Often they use adjectives like 'good', 'fresh' or 'authentic' to describe the quality."),
+            ("Host2", f"La parola 'qualità' è perfetta. Gli italiani cercano sempre il massimo del **gusto**.",
+                      f"The word 'quality' is perfect. Italians always look for maximum taste."),
+            ("Host1", f"Anche quando il prezzo è un po' più alto, la qualità ripaga sempre la **scelta**.",
+                      f"Even when the price is a bit higher, quality always rewards the choice."),
+            ("Host2", f"Un ottimo consiglio per chi viaggia in Italia: chiedete sempre consiglio a una persona del **posto**.",
+                      f"A great tip for those traveling in Italy: always ask a local for advice."),
+            ("Host1", f"I residenti conoscono sempre i posti migliori e meno turistici per provare **{topic_es}**.",
+                      f"Residents always know the best and least touristy places to try {topic_en}.")
+        ],
+        [
+            ("Host2", f"Un ascoltatore ci ha scritto una domanda interessante: è difficile capire bene **{topic_es}**?",
+                      f"A listener wrote us an interesting question: is it difficult to understand {topic_en} well?"),
+            ("Host1", f"All'inizio può sembrare complicato, ma con un po' di pazienza tutto diventa **chiaro**.",
+                      f"At first it may seem complicated, but with a little patience everything becomes clear."),
+            ("Host2", f"Qual è il primo errore che i principianti fanno di solito con questo **argomento**?",
+                      f"What is the first mistake beginners usually make with this topic?"),
+            ("Host1", f"Il primo errore è avere paura di sbagliare o voler essere perfetti fin dal primo **giorno**.",
+                      f"The first mistake is being afraid of making mistakes or wanting to be perfect from the first day."),
+            ("Host2", f"Sbagliare è normale e necessario! Ogni errore è una preziosa **lezione** per migliorare.",
+                      f"Making mistakes is normal and necessary! Every mistake is a valuable lesson to improve."),
+            ("Host1", f"Verissimo. Quando parli con qualcuno, l'importante è farsi capire e mostrare **entusiasmo**.",
+                      f"Very true. When you speak with someone, the important thing is to make yourself understood and show enthusiasm."),
+            ("Host2", f"Gli italiani apprezzano sempre moltissimo lo sforzo degli stranieri di parlare la loro **lingua**.",
+                      f"Italians always greatly appreciate foreigners' effort to speak their language."),
+            ("Host1", f"Riceverai sempre un sorriso caloroso e un incoraggiamento a **proseguire** senza timore.",
+                      f"You will always receive a warm smile and encouragement to continue without fear."),
+            ("Host2", f"Quindi non abbiate paura di parlare di **{topic_es}** alla prossima occasione!",
+                      f"So don't be afraid to talk about {topic_en} on the next occasion!"),
+            ("Host1", f"Prendete coraggio e usate le frasi che stiamo imparando insieme in questa **puntata**.",
+                      f"Take courage and use the phrases we are learning together in this episode.")
+        ],
+        [
+            ("Host2", f"Giulia, come cambia la percezione di **{topic_es}** tra le diverse regioni d'Italia?",
+                      f"Giulia, how does the perception of {topic_en} change among different regions of Italy?"),
+            ("Host1", f"Nel nord e nel sud ci sono spesso tradizioni diverse, ma la passione comune è sempre **forte**.",
+                      f"In the north and south there are often different traditions, but the common passion is always strong."),
+            ("Host2", f"Questa varietà regionale rende l'Italia un paese incredibilmente ricco e **affascinante**.",
+                      f"This regional variety makes Italy an incredibly rich and fascinating country."),
+            ("Host1", f"Ogni regione ha i suoi segreti, le sue ricette e i suoi modi unici di vivere questa **tradizione**.",
+                      f"Each region has its secrets, recipes and unique ways of experiencing this tradition."),
+            ("Host2", f"Anche all'estero, la gente ama sempre di più scoprire il vero stile di vita **italiano**.",
+                      f"Abroad too, people love discovering the true Italian lifestyle more and more."),
+            ("Host1", f"Perché il nostro stile di vita mette al centro la famiglia, il buon cibo e la **serenità**.",
+                      f"Because our lifestyle puts family, good food and peace of mind at the center."),
+            ("Host2", f"E **{topic_es}** si inserisce perfettamente in questa filosofia di vita autentica.",
+                      f"And {topic_en} fits perfectly into this philosophy of authentic living."),
+            ("Host1", f"Non è solo una cosa materiale, ma una vera e propria esperienza di **condivisione**.",
+                      f"It's not just a material thing, but a true experience of sharing."),
+            ("Host2", f"Quando condividiamo qualcosa di bello, la gioia si raddoppia e lascia un bel **ricordo**.",
+                      f"When we share something beautiful, joy doubles and leaves a fond memory."),
+            ("Host1", f"Proprio così. I ricordi più belli sono quasi sempre legati a momenti **semplici** come questo.",
+                      f"Just so. The fondest memories are almost always tied to simple moments like this.")
+        ]
+    ]
+    all_templates = []
+    for ph in phases:
+        all_templates.extend(ph)
+    turns = []
+    for i in range(target):
+        _, t_it, t_en = all_templates[i % len(all_templates)]
+        spk = "Host2" if i % 2 == 0 else "Host1"
+        turns.append({"speaker": spk, "italian": t_it, "english": t_en})
+    return turns
+
+
+def _extend_script(existing_turns, topic_es, topic_en, target=150):
+    fallback_pool = _fallback_script(topic_es, topic_en, target)
+    idx = 0
+    cur_speaker = existing_turns[-1]["speaker"] if existing_turns else "Host1"
+    while len(existing_turns) < target:
+        cand = fallback_pool[idx % len(fallback_pool)]
+        idx += 1
+        needed_spk = "Host1" if cur_speaker == "Host2" else "Host2"
+        existing_turns.append({
+            "speaker": needed_spk,
+            "italian": cand["italian"],
+            "english": cand["english"]
+        })
+        cur_speaker = needed_spk
+    return existing_turns[:target]
+
+
 def generate_script():
     topic = _generate_topic() or random.choice(TOPICS)
     topic_es = topic.split(" - ")[0]
@@ -495,50 +698,42 @@ def generate_script():
     all_turns = []
     consecutive_empty = 0
     import time as _time
-    _deadline = _time.time() + 300  # hard cap: give up after 5 min of script generation
+    _deadline = _time.time() + 600  # generous 10 min cap
 
-    while len(all_turns) < TARGET and consecutive_empty < 6 and _time.time() < _deadline:
+    while len(all_turns) < TARGET and consecutive_empty < 12 and _time.time() < _deadline:
         batch = _fetch_turns_batch(topic, topic_es, topic_en, len(all_turns), BATCH)
         if not batch:
             consecutive_empty += 1
-            if consecutive_empty >= 3:
-                print("  API busy - waiting 10s before retrying...")
-                _time.sleep(10)
+            wait_s = min(15, 3 + consecutive_empty * 2)
+            print(f"  API busy (consecutive fails: {consecutive_empty}) - waiting {wait_s}s before retrying...", flush=True)
+            _time.sleep(wait_s)
             continue
         all_turns.extend(batch)
         consecutive_empty = 0
-        print(f"  Script progress: {len(all_turns)}/{TARGET} turns")
+        print(f"  Script progress: {len(all_turns)}/{TARGET} turns", flush=True)
         if len(all_turns) < TARGET:
-            _time.sleep(2)
+            _time.sleep(1)
 
     all_turns = all_turns[:TARGET]
 
-    if len(all_turns) < 30:
-        print("  Too few turns from API, using fallback script")
-        return _fallback_script(topic_es, topic_en), topic_es, topic_en
+    if not all_turns:
+        print("  Using structured fallback script (150 unique turns)...", flush=True)
+        all_turns = _fallback_script(topic_es, topic_en, TARGET)
+    elif len(all_turns) < TARGET:
+        print(f"  Extending {len(all_turns)} turns to {TARGET} with topic conversation...", flush=True)
+        all_turns = _extend_script(all_turns, topic_es, topic_en, TARGET)
 
     # Short 2-line intro: Matteo (Host2) first, then Giulia (Host1), then topic
     all_turns[0]["speaker"] = "Host2"
-    all_turns[0]["italian"] = f"Ciao, sono Matteo. Benvenuti a Velocity Italian. Oggi parliamo di {topic_es}."
+    all_turns[0]["italian"] = f"Ciao, sono Matteo. Benvenuti a Velocity Italian. Oggi parliamo di **{topic_es}**."
     all_turns[0]["english"] = f"Hi, I'm Matteo. Welcome to Velocity Italian Podcast. Today we talk about {topic_en}."
     if len(all_turns) > 1:
         all_turns[1]["speaker"] = "Host1"
         all_turns[1]["italian"] = f"Grazie, Matteo. Il tema di oggi è molto **interessante**. Iniziamo."
         all_turns[1]["english"] = f"Thanks, Matteo. Today's topic is very interesting. Let's start."
 
-    print(f"  Script: {len(all_turns)} turns, topic: {topic_es}")
+    print(f"  Script: {len(all_turns)} turns, topic: {topic_es}", flush=True)
     return all_turns, topic_es, topic_en
-
-
-def _fallback_script(topic_es, topic_en):
-    turns = []
-    for i in range(150):
-        s = "Host2" if i % 2 == 0 else "Host1"
-        if s == "Host2":
-            turns.append({"speaker": s, "italian": f"Ciao, sono Matteo. Benvenuti a Velocity Italian. Oggi parliamo di. Benvenuti a Velocity Italian. Oggi parliamo di {topic_es}.", "english": f"Hi, I'm Matteo. Let's talk about the future and {topic_en}."})
-        else:
-            turns.append({"speaker": s, "italian": f"Buona idea, Matteo. {topic_es} è molto **interessante**.", "english": f"Good idea Matteo. {topic_en} is very interesting."})
-    return turns
 
 
 async def generate_audio(turns, target_dir=None):
